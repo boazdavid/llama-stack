@@ -40,6 +40,15 @@ def available_providers() -> list[ProviderSpec]:
         ),
         InlineProviderSpec(
             api=Api.safety,
+            provider_type="inline::tool-guard",
+            pip_packages=[],
+            module="llama_stack.providers.inline.safety.tool_guard",
+            config_class="llama_stack.providers.inline.safety.tool_guard.ToolGuardConfig",
+            api_dependencies=[],
+            description="Tool Guard safety provider checking all tool calls adhere to a policy.",
+        ),
+        InlineProviderSpec(
+            api=Api.safety,
             provider_type="inline::code-scanner",
             pip_packages=[
                 "codeshield",
