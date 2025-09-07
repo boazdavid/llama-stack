@@ -24,6 +24,7 @@ from llama_stack.apis.tools import (
 )
 from llama_stack.core.datatypes import AuthenticationRequiredError
 from llama_stack.log import get_logger
+from llama_stack.providers.utils.tools.json_schema_utils import expand_refs
 from llama_stack.providers.utils.tools.ttl_dict import TTLDict
 
 logger = get_logger(__name__, category="tools")
@@ -113,6 +114,12 @@ async def list_mcp_tools(endpoint: str, headers: dict[str, str]) -> ListToolDefs
     async with client_wrapper(endpoint, headers) as session:
         tools_result = await session.list_tools()
         for tool in tools_result.tools:
+
+            # replaces jsonSchema types with $ref with their corresponding $defs
+            tool.inputSchema = expand_refs(tool.inputSchema)
+            if tool.outputSchema:
+                tool.outputSchema = expand_refs(tool.outputSchema)
+            
             parameters = []
             for param_name, param_schema in tool.inputSchema.get("properties", {}).items():
                 parameters.append(
