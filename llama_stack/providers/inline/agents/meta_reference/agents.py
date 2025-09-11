@@ -82,6 +82,7 @@ class MetaReferenceAgentsImpl(Agents):
         await self.responses_store.initialize()
         self.openai_responses_impl = OpenAIResponsesImpl(
             inference_api=self.inference_api,
+            safety_api=self.safety_api,
             tool_groups_api=self.tool_groups_api,
             tool_runtime_api=self.tool_runtime_api,
             responses_store=self.responses_store,

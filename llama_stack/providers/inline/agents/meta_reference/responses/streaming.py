@@ -44,6 +44,7 @@ from llama_stack.apis.inference import (
     OpenAIChoice,
 )
 from llama_stack.apis.inference.inference import OpenAIChatCompletionToolCallFunction, OpenAIMessageParam
+from llama_stack.apis.safety.safety import Safety
 from llama_stack.log import get_logger
 
 from .types import ChatCompletionContext, ChatCompletionResult
@@ -56,6 +57,7 @@ class StreamingResponseOrchestrator:
     def __init__(
         self,
         inference_api: Inference,
+        safety_api: Safety,
         ctx: ChatCompletionContext,
         response_id: str,
         created_at: int,
@@ -64,6 +66,7 @@ class StreamingResponseOrchestrator:
         tool_executor,  # Will be the tool execution logic from the main class
     ):
         self.inference_api = inference_api
+        self.safety_api = safety_api
         self.ctx = ctx
         self.response_id = response_id
         self.created_at = created_at
@@ -372,39 +375,17 @@ class StreamingResponseOrchestrator:
             created=result.created,
             model=result.model,
         )
-    async def _guard_tool_calls(self, tool_calls: list[OpenAIChatCompletionToolCall]):
-        #TODO: to cache the toolguards. 
-        import os
-        guards_path = os.getenv("TOOLGUARDS_PATH", "../gen_policy_validator/eval/airline/tau2/step2_gpt5")
-        if guards_path:
-            sys.path.insert(0, guards_path) #add to python path
-            from rt_toolguard import load_toolguards, IToolInvoker
-            import json
-            class ToolInvoker(IToolInvoker):
-                def invoke(self, toolname: str, arguments: dict[str, Any])->object:
-                   tool_call = OpenAIChatCompletionToolCall(
-                       function=OpenAIChatCompletionToolCallFunction(
-                           name =toolname, 
-                           arguments=json.dumps(arguments)
-                        )
-                    )
-                   return self.tool_executor.execute_tool_call(
-                        tool_call = tool_call,
-                        ctx = self.ctx,
-                        sequence_number = 0,
-                        output_index = 0,
-                        item_id = 0,
-                        # mcp_tool_to_server: dict[str, OpenAIResponseInputToolMCP] | None = None,
-                   )
-
-            toolguards = load_toolguards(guards_path)
-            for tool_call in tool_calls:
-                if tool_call.function:
-                    toolguards.check_toolcall(
-                        tool_call.function.name, 
-                        json.loads(tool_call.function.arguments),
-                        ToolInvoker()
-                    )
+    
+    async def _shield_before_tools(self, messages):
+        shield_id = "airline_toolguard"
+        return await self.safety_api.run_shield(
+            shield_id=shield_id,
+            messages=messages,
+            params={
+                "tool_executor": self.tool_executor,
+                "ctx": self.ctx
+            },
+        )
 
     async def _coordinate_tool_execution(
         self,
@@ -416,7 +397,7 @@ class StreamingResponseOrchestrator:
     ) -> AsyncIterator[OpenAIResponseObjectStream]:
         """Coordinate execution of both function and non-function tool calls."""
         
-        await self._guard_tool_calls(function_tool_calls + non_function_tool_calls)
+        await self._shield_before_tools(next_turn_messages)
 
         # Execute non-function tool calls
         for tool_call in non_function_tool_calls:

@@ -28,6 +28,7 @@ from llama_stack.apis.inference import (
     Inference,
     OpenAISystemMessageParam,
 )
+from llama_stack.apis.safety.safety import Safety
 from llama_stack.apis.tools import ToolGroups, ToolRuntime
 from llama_stack.apis.vector_io import VectorIO
 from llama_stack.log import get_logger
@@ -53,12 +54,14 @@ class OpenAIResponsesImpl:
     def __init__(
         self,
         inference_api: Inference,
+        safety_api: Safety,
         tool_groups_api: ToolGroups,
         tool_runtime_api: ToolRuntime,
         responses_store: ResponsesStore,
         vector_io_api: VectorIO,  # VectorIO
     ):
         self.inference_api = inference_api
+        self.safety_api = safety_api
         self.tool_groups_api = tool_groups_api
         self.tool_runtime_api = tool_runtime_api
         self.responses_store = responses_store
@@ -245,6 +248,7 @@ class OpenAIResponsesImpl:
 
         orchestrator = StreamingResponseOrchestrator(
             inference_api=self.inference_api,
+            safety_api=self.safety_api,
             ctx=ctx,
             response_id=response_id,
             created_at=created_at,
