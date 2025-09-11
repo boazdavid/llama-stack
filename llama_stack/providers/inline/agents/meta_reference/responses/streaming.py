@@ -4,7 +4,6 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-import sys
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -43,7 +42,7 @@ from llama_stack.apis.inference import (
     OpenAIChatCompletionToolCall,
     OpenAIChoice,
 )
-from llama_stack.apis.inference.inference import OpenAIChatCompletionToolCallFunction, OpenAIMessageParam
+from llama_stack.apis.inference.inference import OpenAIMessageParam
 from llama_stack.apis.safety.safety import Safety
 from llama_stack.log import get_logger
 
@@ -169,7 +168,7 @@ class StreamingResponseOrchestrator:
         # Emit response.completed
         yield OpenAIResponseObjectStreamResponseCompleted(response=final_response)
 
-    def _separate_tool_calls(self, current_response:OpenAIChatCompletion, messages:list[OpenAIMessageParam]) -> tuple[list[OpenAIChatCompletionToolCall], list[OpenAIChatCompletionToolCall], list[OpenAIMessageParam]]:
+    def _separate_tool_calls(self, current_response, messages) -> tuple[list, list, list]:
         """Separate tool calls into function and non-function categories."""
         function_tool_calls = []
         non_function_tool_calls = []
@@ -389,11 +388,11 @@ class StreamingResponseOrchestrator:
 
     async def _coordinate_tool_execution(
         self,
-        function_tool_calls: list[OpenAIChatCompletionToolCall],
-        non_function_tool_calls: list[OpenAIChatCompletionToolCall],
+        function_tool_calls: list,
+        non_function_tool_calls: list,
         completion_result_data: ChatCompletionResult,
         output_messages: list[OpenAIResponseOutput],
-        next_turn_messages: list[OpenAIMessageParam],
+        next_turn_messages: list,
     ) -> AsyncIterator[OpenAIResponseObjectStream]:
         """Coordinate execution of both function and non-function tool calls."""
         
