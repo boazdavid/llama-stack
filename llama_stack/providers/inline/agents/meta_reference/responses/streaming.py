@@ -4,9 +4,10 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, List
 
 from llama_stack.apis.agents.openai_responses import (
     AllowedToolsFilter,
@@ -43,7 +44,7 @@ from llama_stack.apis.inference import (
     OpenAIChoice,
 )
 from llama_stack.apis.inference.inference import OpenAIMessageParam
-from llama_stack.apis.safety.safety import Safety
+from llama_stack.apis.safety.safety import RunShieldResponse, Safety, ViolationLevel
 from llama_stack.log import get_logger
 
 from .types import ChatCompletionContext, ChatCompletionResult
@@ -375,16 +376,17 @@ class StreamingResponseOrchestrator:
             model=result.model,
         )
     
-    async def _shield_before_tools(self, messages):
-        shield_id = "airline_toolguard"
-        return await self.safety_api.run_shield(
-            shield_id=shield_id,
-            messages=messages,
-            params={
-                "tool_executor": self.tool_executor,
-                "ctx": self.ctx
-            },
-        )
+    async def _shields_before_tools(self, messages, shield_ids:List[str])->List[RunShieldResponse]:
+        return await asyncio.gather(*[
+            self.safety_api.run_shield(
+                shield_id=shield_id,
+                messages=messages,
+                params={
+                    "tool_executor": self.tool_executor,
+                    "ctx": self.ctx,
+                    "mcp_tool_to_server": self.mcp_tool_to_server
+                },
+            ) for shield_id in shield_ids])
 
     async def _coordinate_tool_execution(
         self,
@@ -396,7 +398,12 @@ class StreamingResponseOrchestrator:
     ) -> AsyncIterator[OpenAIResponseObjectStream]:
         """Coordinate execution of both function and non-function tool calls."""
         
-        await self._shield_before_tools(next_turn_messages)
+        #Before Tools Touch point
+        shield_resps = await self._shields_before_tools(next_turn_messages, ["clinic_toolguard"])
+        if any([shield_resp.violation and shield_resp.violation.violation_level == ViolationLevel.ERROR for shield_resp in shield_resps]):
+            pass
+            # logger.error(shield_resp.violation.user_message)
+            #TODO tool-call error handling. to steam events. to raise exception?
 
         # Execute non-function tool calls
         for tool_call in non_function_tool_calls:
