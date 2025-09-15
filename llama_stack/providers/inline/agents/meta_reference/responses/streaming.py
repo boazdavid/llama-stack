@@ -30,6 +30,7 @@ from llama_stack.apis.agents.openai_responses import (
     OpenAIResponseObjectStreamResponseOutputItemAdded,
     OpenAIResponseObjectStreamResponseOutputItemDone,
     OpenAIResponseObjectStreamResponseOutputTextDelta,
+    OpenAIResponseObjectStreamResponseRefusalDone,
     OpenAIResponseOutput,
     OpenAIResponseOutputMessageFunctionToolCall,
     OpenAIResponseOutputMessageMCPListTools,
@@ -400,10 +401,11 @@ class StreamingResponseOrchestrator:
         
         #Before Tools Touch point
         shield_resps = await self._shields_before_tools(next_turn_messages, ["clinic_toolguard"])
-        if any([shield_resp.violation and shield_resp.violation.violation_level == ViolationLevel.ERROR for shield_resp in shield_resps]):
-            pass
-            # logger.error(shield_resp.violation.user_message)
-            #TODO tool-call error handling. to steam events. to raise exception?
+        for shield_resp in shield_resps:
+            if shield_resp.violation and shield_resp.violation.violation_level == ViolationLevel.ERROR:
+                logger.error(shield_resp.violation.user_message)
+                yield OpenAIResponseObjectStreamResponseRefusalDone(data=shield_resp.violation.model_dump())
+                return
 
         # Execute non-function tool calls
         for tool_call in non_function_tool_calls:

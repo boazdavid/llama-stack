@@ -61,14 +61,14 @@ class ToolGuardSafetyImpl(Safety, ShieldsProtocolPrivate):
         shield = await self.shield_store.get_shield(shield_id)
         if not shield:
             raise ValueError(f"Unknown shield {shield_id}")
-
-        last_message = messages[-1]
-        tool_calls = last_message.tool_calls
-
-        if not tool_calls:
+        if not messages:
             return RunShieldResponse()
         
-        tool_guard_path = params.get("tool_guard_path")
+        last_message = messages[-1]
+        if not last_message.tool_calls: # type: ignore
+            return RunShieldResponse()
+        
+        tool_guard_path = shield.params.get("path")
         sys.path.insert(0, tool_guard_path) #add to python path
         from rt_toolguard import load_toolguards        
         toolguards = load_toolguards(tool_guard_path)
@@ -79,12 +79,12 @@ class ToolGuardSafetyImpl(Safety, ShieldsProtocolPrivate):
             params.get("tool_executor"),
             params.get('mcp_tool_to_server')
         )
-        for tool_call in tool_calls:
+        for tool_call in last_message.tool_calls:
             if tool_call.function:
                 try:
                     toolguards.check_toolcall(
                         tool_call.function.name, 
-                        json.loads(tool_call.function.arguments),
+                        json.loads(tool_call.function.arguments) if tool_call.function.arguments else {},
                         tool_invoker
                     )
                 except PolicyViolationException as ex:

@@ -4,7 +4,7 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Dict, Literal
 
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
@@ -678,6 +678,9 @@ class OpenAIResponseObjectStreamResponseContentPartDone(BaseModel):
     sequence_number: int
     type: Literal["response.content_part.done"] = "response.content_part.done"
 
+class OpenAIResponseObjectStreamResponseRefusalDone(BaseModel):
+    type: Literal["response.refusal.done"] = "response.refusal.done"
+    data: Dict[str, Any]
 
 OpenAIResponseObjectStream = Annotated[
     OpenAIResponseObjectStreamResponseCreated
@@ -700,7 +703,8 @@ OpenAIResponseObjectStream = Annotated[
     | OpenAIResponseObjectStreamResponseMcpCallCompleted
     | OpenAIResponseObjectStreamResponseContentPartAdded
     | OpenAIResponseObjectStreamResponseContentPartDone
-    | OpenAIResponseObjectStreamResponseCompleted,
+    | OpenAIResponseObjectStreamResponseCompleted
+    | OpenAIResponseObjectStreamResponseRefusalDone,
     Field(discriminator="type"),
 ]
 register_schema(OpenAIResponseObjectStream, name="OpenAIResponseObjectStream")
