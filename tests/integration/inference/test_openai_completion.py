@@ -6,10 +6,23 @@
 
 
 import time
+import unicodedata
 
 import pytest
 
 from ..test_cases.test_case import TestCase
+
+
+def _normalize_text(text: str) -> str:
+    """
+    Normalize Unicode text by removing diacritical marks for comparison.
+
+    The test case streaming_01 expects the answer "Sol" for the question "What's the name of the Sun
+    in latin?", but the model is returning "sōl" (with a macron over the 'o'), which is the correct
+    Latin spelling. The test is failing because it's doing a simple case-insensitive string search
+    for "sol" but the actual response contains the diacritical mark.
+    """
+    return unicodedata.normalize("NFD", text).encode("ascii", "ignore").decode("ascii").lower()
 
 
 def provider_from_model(client_with_models, model_id):
@@ -35,12 +48,16 @@ def skip_if_model_doesnt_support_openai_completion(client_with_models, model_id)
         "remote::nvidia",
         "remote::runpod",
         "remote::sambanova",
-        "remote::tgi",
         "remote::vertexai",
         # {"error":{"message":"Unknown request URL: GET /openai/v1/completions. Please check the URL for typos,
         # or see the docs at https://console.groq.com/docs/","type":"invalid_request_error","code":"unknown_url"}}
         "remote::groq",
         "remote::gemini",  # https://generativelanguage.googleapis.com/v1beta/openai/completions -> 404
+        "remote::anthropic",  # at least claude-3-{5,7}-{haiku,sonnet}-* / claude-{sonnet,opus}-4-* are not supported
+        "remote::azure",  # {'error': {'code': 'OperationNotSupported', 'message': 'The completion operation
+        #  does not work with the specified model, gpt-5-mini. Please choose different model and try
+        #  again. You can learn more about which models can be used with each operation here:
+        #  https://go.microsoft.com/fwlink/?linkid=2197993.'}}"}
     ):
         pytest.skip(f"Model {model_id} hosted by {provider.provider_type} doesn't support OpenAI completions.")
 
@@ -73,6 +90,12 @@ def skip_if_doesnt_support_n(client_with_models, model_id):
         # Error code: 400 - [{'error': {'code': 400, 'message': 'Only one candidate can be specified in the
         # current model', 'status': 'INVALID_ARGUMENT'}}]
         "remote::gemini",
+        # https://docs.anthropic.com/en/api/openai-sdk#simple-fields
+        "remote::anthropic",
+        "remote::vertexai",
+        #  Error code: 400 - [{'error': {'code': 400, 'message': 'Unable to submit request because candidateCount must be 1 but
+        #  the entered value was 2. Update the candidateCount value and try again.', 'status': 'INVALID_ARGUMENT'}
+        "remote::tgi",  # TGI ignores n param silently
     ):
         pytest.skip(f"Model {model_id} hosted by {provider.provider_type} doesn't support n param.")
 
@@ -87,7 +110,6 @@ def skip_if_model_doesnt_support_openai_chat_completion(client_with_models, mode
         "remote::cerebras",
         "remote::databricks",
         "remote::runpod",
-        "remote::tgi",
     ):
         pytest.skip(f"Model {model_id} hosted by {provider.provider_type} doesn't support OpenAI chat completions.")
 
@@ -151,7 +173,8 @@ def test_openai_completion_non_streaming_suffix(llama_stack_client, client_with_
     assert len(response.choices) > 0
     choice = response.choices[0]
     assert len(choice.text) > 5
-    assert "france" in choice.text.lower()
+    normalized_text = _normalize_text(choice.text)
+    assert "france" in normalized_text
 
 
 @pytest.mark.parametrize(
@@ -242,7 +265,9 @@ def test_openai_chat_completion_non_streaming(compat_client, client_with_models,
     )
     message_content = response.choices[0].message.content.lower().strip()
     assert len(message_content) > 0
-    assert expected.lower() in message_content
+    normalized_expected = _normalize_text(expected)
+    normalized_content = _normalize_text(message_content)
+    assert normalized_expected in normalized_content
 
 
 @pytest.mark.parametrize(
@@ -266,10 +291,13 @@ def test_openai_chat_completion_streaming(compat_client, client_with_models, tex
     )
     streamed_content = []
     for chunk in response:
-        if chunk.choices[0].delta.content:
+        # On some providers like Azure, the choices are empty on the first chunk, so we need to check for that
+        if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content:
             streamed_content.append(chunk.choices[0].delta.content.lower().strip())
     assert len(streamed_content) > 0
-    assert expected.lower() in "".join(streamed_content)
+    normalized_expected = _normalize_text(expected)
+    normalized_content = _normalize_text("".join(streamed_content))
+    assert normalized_expected in normalized_content
 
 
 @pytest.mark.parametrize(
@@ -302,8 +330,12 @@ def test_openai_chat_completion_streaming_with_n(compat_client, client_with_mode
                     streamed_content.get(choice.index, "") + choice.delta.content.lower().strip()
                 )
     assert len(streamed_content) == 2
+    normalized_expected = _normalize_text(expected)
     for i, content in streamed_content.items():
-        assert expected.lower() in content, f"Choice {i}: Expected {expected.lower()} in {content}"
+        normalized_content = _normalize_text(content)
+        assert normalized_expected in normalized_content, (
+            f"Choice {i}: Expected {normalized_expected} in {normalized_content}"
+        )
 
 
 @pytest.mark.parametrize(
@@ -333,9 +365,9 @@ def test_inference_store(compat_client, client_with_models, text_model_id, strea
         content = ""
         response_id = None
         for chunk in response:
-            if response_id is None:
+            if response_id is None and chunk.id:
                 response_id = chunk.id
-            if chunk.choices[0].delta.content:
+            if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content:
                 content += chunk.choices[0].delta.content
     else:
         response_id = response.id
@@ -404,11 +436,12 @@ def test_inference_store_tool_calls(compat_client, client_with_models, text_mode
         content = ""
         response_id = None
         for chunk in response:
-            if response_id is None:
+            if response_id is None and chunk.id:
                 response_id = chunk.id
-            if delta := chunk.choices[0].delta:
-                if delta.content:
-                    content += delta.content
+            if chunk.choices and len(chunk.choices) > 0:
+                if delta := chunk.choices[0].delta:
+                    if delta.content:
+                        content += delta.content
     else:
         response_id = response.id
         content = response.choices[0].message.content
@@ -478,4 +511,5 @@ def test_openai_chat_completion_non_streaming_with_file(openai_client, client_wi
         stream=False,
     )
     message_content = response.choices[0].message.content.lower().strip()
-    assert "hello world" in message_content
+    normalized_content = _normalize_text(message_content)
+    assert "hello world" in normalized_content
