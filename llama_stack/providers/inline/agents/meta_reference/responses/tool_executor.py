@@ -213,7 +213,7 @@ class ToolExecutor:
         """Execute the tool and return error exception and result."""
         error_exc = None
         result = None
-
+        logger.info(f"Invoking tool {function_name}({{{json.dumps(tool_kwargs)}}})")
         try:
             if mcp_tool_to_server and function_name in mcp_tool_to_server:
                 from llama_stack.providers.utils.tools.mcp import invoke_mcp_tool
