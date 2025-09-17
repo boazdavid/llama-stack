@@ -390,6 +390,11 @@ class StreamingResponseOrchestrator:
                 },
             ) for shield_id in shield_ids])
 
+    def find_shields(self, touch_point:str):
+        if touch_point == "tool_input":
+            return ["myclinic_toolguard"]
+        return []
+    
     async def _coordinate_tool_execution(
         self,
         function_tool_calls: list,
@@ -400,8 +405,9 @@ class StreamingResponseOrchestrator:
     ) -> AsyncIterator[OpenAIResponseObjectStream]:
         """Coordinate execution of both function and non-function tool calls."""
         
-        #Before Tools Touch point
-        shield_resps = await self._shields_before_tools(next_turn_messages, ["clinic_toolguard"])
+        #Tool-input Touch point
+        tool_input_shields = self.find_shields(touch_point= "tool_input")
+        shield_resps = await self._shields_before_tools(next_turn_messages, tool_input_shields)
         is_violation = lambda shield_resp: shield_resp.violation and shield_resp.violation.violation_level == ViolationLevel.ERROR
         violation = next((shield_resp.violation for shield_resp in shield_resps if is_violation(shield_resp)), None)
         if violation:
