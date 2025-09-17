@@ -5,6 +5,7 @@
 # the root directory of this source tree.
 
 import asyncio
+import json
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any, List
@@ -44,7 +45,7 @@ from llama_stack.apis.inference import (
     OpenAIChatCompletionToolCall,
     OpenAIChoice,
 )
-from llama_stack.apis.inference.inference import OpenAIMessageParam
+from llama_stack.apis.inference.inference import OpenAIChatCompletionContentPartTextParam, OpenAIMessageParam, OpenAIToolMessageParam
 from llama_stack.apis.safety.safety import RunShieldResponse, Safety, ViolationLevel
 from llama_stack.log import get_logger
 
@@ -401,11 +402,17 @@ class StreamingResponseOrchestrator:
         
         #Before Tools Touch point
         shield_resps = await self._shields_before_tools(next_turn_messages, ["clinic_toolguard"])
-        for shield_resp in shield_resps:
-            if shield_resp.violation and shield_resp.violation.violation_level == ViolationLevel.ERROR:
-                logger.error(shield_resp.violation.user_message)
-                yield OpenAIResponseObjectStreamResponseRefusalDone(data=shield_resp.violation.model_dump())
-                return
+        is_violation = lambda shield_resp: shield_resp.violation and shield_resp.violation.violation_level == ViolationLevel.ERROR
+        violation = next((shield_resp.violation for shield_resp in shield_resps if is_violation(shield_resp)), None)
+        if violation:
+            logger.error(violation.user_message)
+            yield OpenAIResponseObjectStreamResponseRefusalDone(data=violation.model_dump())
+            for tool_call in non_function_tool_calls:
+                next_turn_messages.append(OpenAIToolMessageParam(
+                    tool_call_id=tool_call.id,
+                    content=json.dumps({"error": violation.user_message})
+                ))
+            return
 
         # Execute non-function tool calls
         for tool_call in non_function_tool_calls:
