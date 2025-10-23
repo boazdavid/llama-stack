@@ -4,14 +4,13 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-import argparse
 import asyncio
+import concurrent.futures
 import functools
 import inspect
 import json
 import logging  # allow-direct-logging
 import os
-import ssl
 import sys
 import traceback
 import warnings
@@ -24,7 +23,6 @@ from typing import Annotated, Any, get_origin
 import httpx
 import rich.pretty
 import yaml
-from aiohttp import hdrs
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi import Path as FastapiPath
 from fastapi.exceptions import RequestValidationError
@@ -35,7 +33,6 @@ from pydantic import BaseModel, ValidationError
 
 from llama_stack.apis.common.errors import ConflictError, ResourceNotFoundError
 from llama_stack.apis.common.responses import PaginatedResponse
-from llama_stack.cli.utils import add_config_distro_args, get_config_from_args
 from llama_stack.core.access_control.access_control import AccessDeniedError
 from llama_stack.core.datatypes import (
     AuthenticationRequiredError,
@@ -44,29 +41,22 @@ from llama_stack.core.datatypes import (
     process_cors_config,
 )
 from llama_stack.core.distribution import builtin_automatically_routed_apis
-from llama_stack.core.external import ExternalApiSpec, load_external_apis
+from llama_stack.core.external import load_external_apis
 from llama_stack.core.request_headers import (
     PROVIDER_DATA_VAR,
     request_provider_data_context,
     user_from_scope,
 )
-from llama_stack.core.resolver import InvalidProviderError
-from llama_stack.core.server.routes import (
-    find_matching_route,
-    get_all_api_routes,
-    initialize_route_impls,
-)
+from llama_stack.core.server.routes import get_all_api_routes
 from llama_stack.core.stack import (
+    Stack,
     cast_image_name_to_string,
-    construct_stack,
     replace_env_vars,
-    shutdown_stack,
-    validate_env_pair,
 )
 from llama_stack.core.utils.config import redact_sensitive_fields
 from llama_stack.core.utils.config_resolution import Mode, resolve_config_or_distro
 from llama_stack.core.utils.context import preserve_contexts_async_generator
-from llama_stack.log import get_logger
+from llama_stack.log import get_logger, setup_logging
 from llama_stack.providers.datatypes import Api
 from llama_stack.providers.inline.telemetry.meta_reference.config import TelemetryConfig
 from llama_stack.providers.inline.telemetry.meta_reference.telemetry import (
@@ -74,13 +64,12 @@ from llama_stack.providers.inline.telemetry.meta_reference.telemetry import (
 )
 from llama_stack.providers.utils.telemetry.tracing import (
     CURRENT_TRACE_CONTEXT,
-    end_trace,
     setup_logger,
-    start_trace,
 )
 
 from .auth import AuthenticationMiddleware
 from .quota import QuotaMiddleware
+from .tracing import TracingMiddleware
 
 REPO_ROOT = Path(__file__).parent.parent.parent.parent
 
@@ -149,6 +138,13 @@ def translate_exception(exc: Exception) -> HTTPException | RequestValidationErro
         return HTTPException(status_code=httpx.codes.NOT_IMPLEMENTED, detail=f"Not implemented: {str(exc)}")
     elif isinstance(exc, AuthenticationRequiredError):
         return HTTPException(status_code=httpx.codes.UNAUTHORIZED, detail=f"Authentication required: {str(exc)}")
+    elif hasattr(exc, "status_code") and isinstance(getattr(exc, "status_code", None), int):
+        # Handle provider SDK exceptions (e.g., OpenAI's APIStatusError and subclasses)
+        # These include AuthenticationError (401), PermissionDeniedError (403), etc.
+        # This preserves the actual HTTP status code from the provider
+        status_code = exc.status_code
+        detail = str(exc)
+        return HTTPException(status_code=status_code, detail=detail)
     else:
         return HTTPException(
             status_code=httpx.codes.INTERNAL_SERVER_ERROR,
@@ -156,26 +152,51 @@ def translate_exception(exc: Exception) -> HTTPException | RequestValidationErro
         )
 
 
-async def shutdown(app):
-    """Initiate a graceful shutdown of the application.
-
-    Handled by the lifespan context manager. The shutdown process involves
-    shutting down all implementations registered in the application.
+class StackApp(FastAPI):
     """
-    await shutdown_stack(app.__llama_stack_impls__)
+    A wrapper around the FastAPI application to hold a reference to the Stack instance so that we can
+    start background tasks (e.g. refresh model registry periodically) from the lifespan context manager.
+    """
+
+    def __init__(self, config: StackRunConfig, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stack: Stack = Stack(config)
+
+        # This code is called from a running event loop managed by uvicorn so we cannot simply call
+        # asyncio.run() to initialize the stack. We cannot await either since this is not an async
+        # function.
+        # As a workaround, we use a thread pool executor to run the initialize() method
+        # in a separate thread.
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, self.stack.initialize())
+            future.result()
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting up")
+async def lifespan(app: StackApp):
+    server_version = parse_version("llama-stack")
+
+    logger.info(f"Starting up Llama Stack server (version: {server_version})")
+    assert app.stack is not None
+    app.stack.create_registry_refresh_task()
     yield
     logger.info("Shutting down")
-    await shutdown(app)
+    await app.stack.shutdown()
 
 
 def is_streaming_request(func_name: str, request: Request, **kwargs):
     # TODO: pass the api method and punt it to the Protocol definition directly
-    return kwargs.get("stream", False)
+    # If there's a stream parameter at top level, use it
+    if "stream" in kwargs:
+        return kwargs["stream"]
+
+    # If there's a stream parameter inside a "params" parameter, e.g. openai_chat_completion() use it
+    if "params" in kwargs:
+        params = kwargs["params"]
+        if hasattr(params, "stream"):
+            return params.stream
+
+    return False
 
 
 async def maybe_await(value):
@@ -230,15 +251,31 @@ def create_dynamic_typed_route(func: Any, method: str, route: str) -> Callable:
 
         await log_request_pre_validation(request)
 
+        test_context_token = None
+        test_context_var = None
+        reset_test_context_fn = None
+
         # Use context manager with both provider data and auth attributes
         with request_provider_data_context(request.headers, user):
+            if os.environ.get("LLAMA_STACK_TEST_INFERENCE_MODE"):
+                from llama_stack.core.testing_context import (
+                    TEST_CONTEXT,
+                    reset_test_context,
+                    sync_test_context_from_provider_data,
+                )
+
+                test_context_token = sync_test_context_from_provider_data()
+                test_context_var = TEST_CONTEXT
+                reset_test_context_fn = reset_test_context
+
             is_streaming = is_streaming_request(func.__name__, request, **kwargs)
 
             try:
                 if is_streaming:
-                    gen = preserve_contexts_async_generator(
-                        sse_generator(func(**kwargs)), [CURRENT_TRACE_CONTEXT, PROVIDER_DATA_VAR]
-                    )
+                    context_vars = [CURRENT_TRACE_CONTEXT, PROVIDER_DATA_VAR]
+                    if test_context_var is not None:
+                        context_vars.append(test_context_var)
+                    gen = preserve_contexts_async_generator(sse_generator(func(**kwargs)), context_vars)
                     return StreamingResponse(gen, media_type="text/event-stream")
                 else:
                     value = func(**kwargs)
@@ -251,11 +288,14 @@ def create_dynamic_typed_route(func: Any, method: str, route: str) -> Callable:
 
                     return result
             except Exception as e:
-                if logger.isEnabledFor(logging.DEBUG):
+                if logger.isEnabledFor(logging.INFO):
                     logger.exception(f"Error executing endpoint {route=} {method=}")
                 else:
                     logger.error(f"Error executing endpoint {route=} {method=}: {str(e)}")
                 raise translate_exception(e) from e
+            finally:
+                if test_context_token is not None and reset_test_context_fn is not None:
+                    reset_test_context_fn(test_context_token)
 
     sig = inspect.signature(func)
 
@@ -285,65 +325,6 @@ def create_dynamic_typed_route(func: Any, method: str, route: str) -> Callable:
     route_handler.__signature__ = sig.replace(parameters=new_params)
 
     return route_handler
-
-
-class TracingMiddleware:
-    def __init__(self, app, impls, external_apis: dict[str, ExternalApiSpec]):
-        self.app = app
-        self.impls = impls
-        self.external_apis = external_apis
-        # FastAPI built-in paths that should bypass custom routing
-        self.fastapi_paths = ("/docs", "/redoc", "/openapi.json", "/favicon.ico", "/static")
-
-    async def __call__(self, scope, receive, send):
-        if scope.get("type") == "lifespan":
-            return await self.app(scope, receive, send)
-
-        path = scope.get("path", "")
-
-        # Check if the path is a FastAPI built-in path
-        if path.startswith(self.fastapi_paths):
-            # Pass through to FastAPI's built-in handlers
-            logger.debug(f"Bypassing custom routing for FastAPI built-in path: {path}")
-            return await self.app(scope, receive, send)
-
-        if not hasattr(self, "route_impls"):
-            self.route_impls = initialize_route_impls(self.impls, self.external_apis)
-
-        try:
-            _, _, route_path, webmethod = find_matching_route(
-                scope.get("method", hdrs.METH_GET), path, self.route_impls
-            )
-        except ValueError:
-            # If no matching endpoint is found, pass through to FastAPI
-            logger.debug(f"No matching route found for path: {path}, falling back to FastAPI")
-            return await self.app(scope, receive, send)
-
-        trace_attributes = {"__location__": "server", "raw_path": path}
-
-        # Extract W3C trace context headers and store as trace attributes
-        headers = dict(scope.get("headers", []))
-        traceparent = headers.get(b"traceparent", b"").decode()
-        if traceparent:
-            trace_attributes["traceparent"] = traceparent
-        tracestate = headers.get(b"tracestate", b"").decode()
-        if tracestate:
-            trace_attributes["tracestate"] = tracestate
-
-        trace_path = webmethod.descriptive_name or route_path
-        trace_context = await start_trace(trace_path, trace_attributes)
-
-        async def send_with_trace_id(message):
-            if message["type"] == "http.response.start":
-                headers = message.get("headers", [])
-                headers.append([b"x-trace-id", str(trace_context.trace_id).encode()])
-                message["headers"] = headers
-            await send(message)
-
-        try:
-            return await self.app(scope, receive, send_with_trace_id)
-        finally:
-            await end_trace()
 
 
 class ClientVersionMiddleware:
@@ -386,73 +367,49 @@ class ClientVersionMiddleware:
         return await self.app(scope, receive, send)
 
 
-def main(args: argparse.Namespace | None = None):
-    """Start the LlamaStack server."""
-    parser = argparse.ArgumentParser(description="Start the LlamaStack server.")
+def create_app() -> StackApp:
+    """Create and configure the FastAPI application.
 
-    add_config_distro_args(parser)
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.getenv("LLAMA_STACK_PORT", 8321)),
-        help="Port to listen on",
-    )
-    parser.add_argument(
-        "--env",
-        action="append",
-        help="Environment variables in KEY=value format. Can be specified multiple times.",
-    )
+    This factory function reads configuration from environment variables:
+    - LLAMA_STACK_CONFIG: Path to config file (required)
 
-    # Determine whether the server args are being passed by the "run" command, if this is the case
-    # the args will be passed as a Namespace object to the main function, otherwise they will be
-    # parsed from the command line
-    if args is None:
-        args = parser.parse_args()
+    Returns:
+        Configured StackApp instance.
+    """
+    # Initialize logging from environment variables first
+    setup_logging()
 
-    config_or_distro = get_config_from_args(args)
-    config_file = resolve_config_or_distro(config_or_distro, Mode.RUN)
+    config_file = os.getenv("LLAMA_STACK_CONFIG")
+    if config_file is None:
+        raise ValueError("LLAMA_STACK_CONFIG environment variable is required")
 
+    config_file = resolve_config_or_distro(config_file, Mode.RUN)
+
+    # Load and process configuration
     logger_config = None
     with open(config_file) as fp:
         config_contents = yaml.safe_load(fp)
         if isinstance(config_contents, dict) and (cfg := config_contents.get("logging_config")):
             logger_config = LoggingConfig(**cfg)
         logger = get_logger(name=__name__, category="core::server", config=logger_config)
-        if args.env:
-            for env_pair in args.env:
-                try:
-                    key, value = validate_env_pair(env_pair)
-                    logger.info(f"Setting CLI environment variable {key} => {value}")
-                    os.environ[key] = value
-                except ValueError as e:
-                    logger.error(f"Error: {str(e)}")
-                    sys.exit(1)
+
         config = replace_env_vars(config_contents)
         config = StackRunConfig(**cast_image_name_to_string(config))
 
     _log_run_config(run_config=config)
 
-    app = FastAPI(
+    app = StackApp(
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
+        config=config,
     )
 
     if not os.environ.get("LLAMA_STACK_DISABLE_VERSION_CHECK"):
         app.add_middleware(ClientVersionMiddleware)
 
-    try:
-        # Create and set the event loop that will be used for both construction and server runtime
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        # Construct the stack in the persistent event loop
-        impls = loop.run_until_complete(construct_stack(config))
-
-    except InvalidProviderError as e:
-        logger.error(f"Error: {str(e)}")
-        sys.exit(1)
+    impls = app.stack.impls
 
     if config.server.auth:
         logger.info(f"Enabling authentication with provider: {config.server.auth.provider_config.type.value}")
@@ -493,7 +450,7 @@ def main(args: argparse.Namespace | None = None):
         if cors_config:
             app.add_middleware(CORSMiddleware, **cors_config.model_dump())
 
-    if Api.telemetry in impls:
+    if config.telemetry.enabled:
         setup_logger(impls[Api.telemetry])
     else:
         setup_logger(TelemetryAdapter(TelemetryConfig(), {}))
@@ -516,6 +473,7 @@ def main(args: argparse.Namespace | None = None):
     apis_to_serve.add("inspect")
     apis_to_serve.add("providers")
     apis_to_serve.add("prompts")
+    apis_to_serve.add("conversations")
     for api_str in apis_to_serve:
         api = Api(api_str)
 
@@ -553,64 +511,9 @@ def main(args: argparse.Namespace | None = None):
     app.exception_handler(RequestValidationError)(global_exception_handler)
     app.exception_handler(Exception)(global_exception_handler)
 
-    app.__llama_stack_impls__ = impls
     app.add_middleware(TracingMiddleware, impls=impls, external_apis=external_apis)
 
-    import uvicorn
-
-    # Configure SSL if certificates are provided
-    port = args.port or config.server.port
-
-    ssl_config = None
-    keyfile = config.server.tls_keyfile
-    certfile = config.server.tls_certfile
-
-    if keyfile and certfile:
-        ssl_config = {
-            "ssl_keyfile": keyfile,
-            "ssl_certfile": certfile,
-        }
-        if config.server.tls_cafile:
-            ssl_config["ssl_ca_certs"] = config.server.tls_cafile
-            ssl_config["ssl_cert_reqs"] = ssl.CERT_REQUIRED
-            logger.info(
-                f"HTTPS enabled with certificates:\n  Key: {keyfile}\n  Cert: {certfile}\n  CA: {config.server.tls_cafile}"
-            )
-        else:
-            logger.info(f"HTTPS enabled with certificates:\n  Key: {keyfile}\n  Cert: {certfile}")
-
-    listen_host = config.server.host or ["::", "0.0.0.0"]
-    logger.info(f"Listening on {listen_host}:{port}")
-
-    uvicorn_config = {
-        "app": app,
-        "host": listen_host,
-        "port": port,
-        "lifespan": "on",
-        "log_level": logger.getEffectiveLevel(),
-        "log_config": logger_config,
-    }
-    if ssl_config:
-        uvicorn_config.update(ssl_config)
-
-    # Run uvicorn in the existing event loop to preserve background tasks
-    # We need to catch KeyboardInterrupt because uvicorn's signal handling
-    # re-raises SIGINT signals using signal.raise_signal(), which Python
-    # converts to KeyboardInterrupt. Without this catch, we'd get a confusing
-    # stack trace when using Ctrl+C or kill -2 (SIGINT).
-    # SIGTERM (kill -15) works fine without this because Python doesn't
-    # have a default handler for it.
-    #
-    # Another approach would be to ignore SIGINT entirely - let uvicorn handle it through its own
-    # signal handling but this is quite intrusive and not worth the effort.
-    try:
-        loop.run_until_complete(uvicorn.Server(uvicorn.Config(**uvicorn_config)).serve())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Received interrupt signal, shutting down gracefully...")
-    finally:
-        if not loop.is_closed():
-            logger.debug("Closing event loop")
-            loop.close()
+    return app
 
 
 def _log_run_config(run_config: StackRunConfig):
@@ -639,7 +542,3 @@ def remove_disabled_providers(obj):
         return [item for item in (remove_disabled_providers(i) for i in obj) if item is not None]
     else:
         return obj
-
-
-if __name__ == "__main__":
-    main()

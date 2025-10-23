@@ -16,17 +16,16 @@ from llama_stack.core.datatypes import BuildConfig, DistributionSpec
 from llama_stack.core.external import load_external_apis
 from llama_stack.log import get_logger
 from llama_stack.providers.datatypes import (
-    AdapterSpec,
     Api,
     InlineProviderSpec,
     ProviderSpec,
-    remote_provider_spec,
+    RemoteProviderSpec,
 )
 
 logger = get_logger(name=__name__, category="core")
 
 
-INTERNAL_APIS = {Api.inspect, Api.providers, Api.prompts}
+INTERNAL_APIS = {Api.inspect, Api.providers, Api.prompts, Api.conversations, Api.telemetry}
 
 
 def stack_apis() -> list[Api]:
@@ -49,10 +48,6 @@ def builtin_automatically_routed_apis() -> list[AutoRoutedApiInfo]:
             router_api=Api.safety,
         ),
         AutoRoutedApiInfo(
-            routing_table_api=Api.vector_dbs,
-            router_api=Api.vector_io,
-        ),
-        AutoRoutedApiInfo(
             routing_table_api=Api.datasets,
             router_api=Api.datasetio,
         ),
@@ -68,6 +63,10 @@ def builtin_automatically_routed_apis() -> list[AutoRoutedApiInfo]:
             routing_table_api=Api.tool_groups,
             router_api=Api.tool_runtime,
         ),
+        AutoRoutedApiInfo(
+            routing_table_api=Api.vector_stores,
+            router_api=Api.vector_io,
+        ),
     ]
 
 
@@ -77,27 +76,12 @@ def providable_apis() -> list[Api]:
 
 
 def _load_remote_provider_spec(spec_data: dict[str, Any], api: Api) -> ProviderSpec:
-    adapter = AdapterSpec(**spec_data["adapter"])
-    spec = remote_provider_spec(
-        api=api,
-        adapter=adapter,
-        api_dependencies=[Api(dep) for dep in spec_data.get("api_dependencies", [])],
-    )
+    spec = RemoteProviderSpec(api=api, provider_type=f"remote::{spec_data['adapter_type']}", **spec_data)
     return spec
 
 
 def _load_inline_provider_spec(spec_data: dict[str, Any], api: Api, provider_name: str) -> ProviderSpec:
-    spec = InlineProviderSpec(
-        api=api,
-        provider_type=f"inline::{provider_name}",
-        pip_packages=spec_data.get("pip_packages", []),
-        module=spec_data["module"],
-        config_class=spec_data["config_class"],
-        api_dependencies=[Api(dep) for dep in spec_data.get("api_dependencies", [])],
-        optional_api_dependencies=[Api(dep) for dep in spec_data.get("optional_api_dependencies", [])],
-        provider_data_validator=spec_data.get("provider_data_validator"),
-        container_image=spec_data.get("container_image"),
-    )
+    spec = InlineProviderSpec(api=api, provider_type=f"inline::{provider_name}", **spec_data)
     return spec
 
 
@@ -259,6 +243,7 @@ def get_external_providers_from_module(
                     spec = module.get_provider_spec()
                 else:
                     # pass in a partially filled out provider spec to satisfy the registry -- knowing we will be overwriting it later upon build and run
+                    # in the case we are building we CANNOT import this module of course because it has not been installed.
                     spec = ProviderSpec(
                         api=Api(provider_api),
                         provider_type=provider.provider_type,
@@ -267,9 +252,20 @@ def get_external_providers_from_module(
                         config_class="",
                     )
                 provider_type = provider.provider_type
-                # in the case we are building we CANNOT import this module of course because it has not been installed.
-                # return a partially filled out spec that the build script will populate.
-                registry[Api(provider_api)][provider_type] = spec
+                if isinstance(spec, list):
+                    # optionally allow people to pass inline and remote provider specs as a returned list.
+                    # with the old method, users could pass in directories of specs using overlapping code
+                    # we want to ensure we preserve that flexibility in this method.
+                    logger.info(
+                        f"Detected a list of external provider specs from {provider.module} adding all to the registry"
+                    )
+                    for provider_spec in spec:
+                        if provider_spec.provider_type != provider.provider_type:
+                            continue
+                        logger.info(f"Adding {provider.provider_type} to registry")
+                        registry[Api(provider_api)][provider.provider_type] = provider_spec
+                else:
+                    registry[Api(provider_api)][provider_type] = spec
             except ModuleNotFoundError as exc:
                 raise ValueError(
                     "get_provider_spec not found. If specifying an external provider via `module` in the Provider spec, the Provider must have the `provider.get_provider_spec` module available"

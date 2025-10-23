@@ -7,7 +7,7 @@
 [![Unit Tests](https://github.com/meta-llama/llama-stack/actions/workflows/unit-tests.yml/badge.svg?branch=main)](https://github.com/meta-llama/llama-stack/actions/workflows/unit-tests.yml?query=branch%3Amain)
 [![Integration Tests](https://github.com/meta-llama/llama-stack/actions/workflows/integration-tests.yml/badge.svg?branch=main)](https://github.com/meta-llama/llama-stack/actions/workflows/integration-tests.yml?query=branch%3Amain)
 
-[**Quick Start**](https://llama-stack.readthedocs.io/en/latest/getting_started/index.html) | [**Documentation**](https://llama-stack.readthedocs.io/en/latest/index.html) | [**Colab Notebook**](./docs/getting_started.ipynb) | [**Discord**](https://discord.gg/llama-stack)
+[**Quick Start**](https://llamastack.github.io/docs/getting_started/quickstart) | [**Documentation**](https://llamastack.github.io/docs) | [**Colab Notebook**](./docs/getting_started.ipynb) | [**Discord**](https://discord.gg/llama-stack)
 
 
 ### ✨🎉 Llama 4 Support  🎉✨
@@ -25,10 +25,13 @@ pip install -U llama_stack
 
 MODEL="Llama-4-Scout-17B-16E-Instruct"
 # get meta url from llama.com
-llama model download --source meta --model-id $MODEL --meta-url <META_URL>
+huggingface-cli download meta-llama/$MODEL --local-dir ~/.llama/$MODEL
+
+# install dependencies for the distribution
+llama stack list-deps meta-reference-gpu | xargs -L1 uv pip install
 
 # start a llama stack server
-INFERENCE_MODEL=meta-llama/$MODEL llama stack build --run --template meta-reference-gpu
+INFERENCE_MODEL=meta-llama/$MODEL llama stack run meta-reference-gpu
 
 # install client to interact with the server
 pip install llama-stack-client
@@ -43,10 +46,21 @@ inference chat-completion \
 --model-id meta-llama/$MODEL \
 --message "write a haiku for meta's llama 4 models"
 
-ChatCompletionResponse(
-    completion_message=CompletionMessage(content="Whispers in code born\nLlama's gentle, wise heartbeat\nFuture's soft unfold", role='assistant', stop_reason='end_of_turn', tool_calls=[]),
-    logprobs=None,
-    metrics=[Metric(metric='prompt_tokens', value=21.0, unit=None), Metric(metric='completion_tokens', value=28.0, unit=None), Metric(metric='total_tokens', value=49.0, unit=None)]
+OpenAIChatCompletion(
+    ...
+    choices=[
+        OpenAIChatCompletionChoice(
+            finish_reason='stop',
+            index=0,
+            message=OpenAIChatCompletionChoiceMessageOpenAIAssistantMessageParam(
+                role='assistant',
+                content='...**Silent minds awaken,**  \n**Whispers of billions of words,**  \n**Reasoning breaks the night.**  \n\n—  \n*This haiku blends the essence of LLaMA 4\'s capabilities with nature-inspired metaphor, evoking its vast training data and transformative potential.*',
+                ...
+            ),
+            ...
+        )
+    ],
+    ...
 )
 ```
 ### Python SDK
@@ -59,14 +73,14 @@ model_id = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
 prompt = "Write a haiku about coding"
 
 print(f"User> {prompt}")
-response = client.inference.chat_completion(
-    model_id=model_id,
+response = client.chat.completions.create(
+    model=model_id,
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": prompt},
     ],
 )
-print(f"Assistant> {response.completion_message.content}")
+print(f"Assistant> {response.choices[0].message.content}")
 ```
 As more providers start supporting Llama 4, you can use them in Llama Stack as well. We are adding to the list. Stay tuned!
 
@@ -78,7 +92,7 @@ As more providers start supporting Llama 4, you can use them in Llama Stack as w
 To try Llama Stack locally, run:
 
 ```bash
-curl -LsSf https://github.com/meta-llama/llama-stack/raw/main/scripts/install.sh | bash
+curl -LsSf https://github.com/llamastack/llama-stack/raw/main/scripts/install.sh | bash
 ```
 
 ### Overview
@@ -109,7 +123,7 @@ By reducing friction and complexity, Llama Stack empowers developers to focus on
 
 ### API Providers
 Here is a list of the various API providers and available distributions that can help developers get started easily with Llama Stack.
-Please checkout for [full list](https://llama-stack.readthedocs.io/en/latest/providers/index.html)
+Please checkout for [full list](https://llamastack.github.io/docs/providers)
 
 | API Provider Builder | Environments | Agents | Inference | VectorIO | Safety | Telemetry | Post Training | Eval | DatasetIO |
 |:--------------------:|:------------:|:------:|:---------:|:--------:|:------:|:---------:|:-------------:|:----:|:--------:|
@@ -140,7 +154,7 @@ Please checkout for [full list](https://llama-stack.readthedocs.io/en/latest/pro
 |     NVIDIA NEMO      | Hosted | | ✅ | ✅ | | | ✅ | ✅ | ✅ |
 |        NVIDIA        | Hosted | | | | | | ✅ | ✅ | ✅ |
 
-> **Note**: Additional providers are available through external packages. See [External Providers](https://llama-stack.readthedocs.io/en/latest/providers/external.html) documentation.
+> **Note**: Additional providers are available through external packages. See [External Providers](https://llamastack.github.io/docs/providers/external) documentation.
 
 ### Distributions
 
@@ -149,24 +163,24 @@ Here are some of the distributions we support:
 
 |               **Distribution**                |                                                                    **Llama Stack Docker**                                                                     |                                                 Start This Distribution                                                  |
 |:---------------------------------------------:|:-------------------------------------------------------------------------------------------------------------------------------------------------------------:|:------------------------------------------------------------------------------------------------------------------------:|
-|                Starter Distribution                 |           [llamastack/distribution-starter](https://hub.docker.com/repository/docker/llamastack/distribution-starter/general)           |      [Guide](https://llama-stack.readthedocs.io/en/latest/distributions/self_hosted_distro/starter.html)      |
-|                Meta Reference                 |           [llamastack/distribution-meta-reference-gpu](https://hub.docker.com/repository/docker/llamastack/distribution-meta-reference-gpu/general)           |      [Guide](https://llama-stack.readthedocs.io/en/latest/distributions/self_hosted_distro/meta-reference-gpu.html)      |
+|                Starter Distribution                 |           [llamastack/distribution-starter](https://hub.docker.com/repository/docker/llamastack/distribution-starter/general)           |      [Guide](https://llamastack.github.io/latest/distributions/self_hosted_distro/starter.html)      |
+|                Meta Reference                 |           [llamastack/distribution-meta-reference-gpu](https://hub.docker.com/repository/docker/llamastack/distribution-meta-reference-gpu/general)           |      [Guide](https://llamastack.github.io/latest/distributions/self_hosted_distro/meta-reference-gpu.html)      |
 |                   PostgreSQL                  |                [llamastack/distribution-postgres-demo](https://hub.docker.com/repository/docker/llamastack/distribution-postgres-demo/general)                |                  |
 
 ### Documentation
 
-Please checkout our [Documentation](https://llama-stack.readthedocs.io/en/latest/index.html) page for more details.
+Please checkout our [Documentation](https://llamastack.github.io/latest/index.html) page for more details.
 
 * CLI references
-    * [llama (server-side) CLI Reference](https://llama-stack.readthedocs.io/en/latest/references/llama_cli_reference/index.html): Guide for using the `llama` CLI to work with Llama models (download, study prompts), and building/starting a Llama Stack distribution.
-    * [llama (client-side) CLI Reference](https://llama-stack.readthedocs.io/en/latest/references/llama_stack_client_cli_reference.html): Guide for using the `llama-stack-client` CLI, which allows you to query information about the distribution.
+    * [llama (server-side) CLI Reference](https://llamastack.github.io/latest/references/llama_cli_reference/index.html): Guide for using the `llama` CLI to work with Llama models (download, study prompts), and building/starting a Llama Stack distribution.
+    * [llama (client-side) CLI Reference](https://llamastack.github.io/latest/references/llama_stack_client_cli_reference.html): Guide for using the `llama-stack-client` CLI, which allows you to query information about the distribution.
 * Getting Started
-    * [Quick guide to start a Llama Stack server](https://llama-stack.readthedocs.io/en/latest/getting_started/index.html).
+    * [Quick guide to start a Llama Stack server](https://llamastack.github.io/latest/getting_started/index.html).
     * [Jupyter notebook](./docs/getting_started.ipynb) to walk-through how to use simple text and vision inference llama_stack_client APIs
     * The complete Llama Stack lesson [Colab notebook](https://colab.research.google.com/drive/1dtVmxotBsI4cGZQNsJRYPrLiDeT0Wnwt) of the new [Llama 3.2 course on Deeplearning.ai](https://learn.deeplearning.ai/courses/introducing-multimodal-llama-3-2/lesson/8/llama-stack).
     * A [Zero-to-Hero Guide](https://github.com/meta-llama/llama-stack/tree/main/docs/zero_to_hero_guide) that guide you through all the key components of llama stack with code samples.
 * [Contributing](CONTRIBUTING.md)
-    * [Adding a new API Provider](https://llama-stack.readthedocs.io/en/latest/contributing/new_api_provider.html) to walk-through how to add a new API provider.
+    * [Adding a new API Provider](https://llamastack.github.io/latest/contributing/new_api_provider.html) to walk-through how to add a new API provider.
 
 ### Llama Stack Client SDKs
 
