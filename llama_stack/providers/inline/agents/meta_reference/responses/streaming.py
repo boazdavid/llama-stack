@@ -116,7 +116,6 @@ class StreamingResponseOrchestrator:
         max_infer_iters: int,
         tool_executor,  # Will be the tool execution logic from the main class
         instructions: str,
-        safety_api,
         guardrail_ids: list[str] | None = None,
     ):
         self.inference_api = inference_api
@@ -127,7 +126,6 @@ class StreamingResponseOrchestrator:
         self.text = text
         self.max_infer_iters = max_infer_iters
         self.tool_executor = tool_executor
-        self.safety_api = safety_api
         self.guardrail_ids = guardrail_ids or []
         self.sequence_number = 0
         # Store MCP tool mapping that gets built during tool processing
