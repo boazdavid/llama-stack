@@ -954,10 +954,6 @@ class OpenAIResponseObjectStreamResponseContentPartDone(BaseModel):
     sequence_number: int
     type: Literal["response.content_part.done"] = "response.content_part.done"
 
-class OpenAIResponseObjectStreamResponseRefusalDone(BaseModel):
-    type: Literal["response.refusal.done"] = "response.refusal.done"
-    data: Dict[str, Any]
-
 @json_schema_type
 class OpenAIResponseObjectStreamResponseReasoningTextDelta(BaseModel):
     """Streaming event for incremental reasoning text updates.
