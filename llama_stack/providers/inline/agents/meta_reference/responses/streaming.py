@@ -8,7 +8,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any, List
+from typing import Any, Dict, List
 
 from llama_stack.apis.agents.openai_responses import (
     AllowedToolsFilter,
@@ -868,21 +868,22 @@ class StreamingResponseOrchestrator:
         )
     
     async def _shields_before_tools(self, messages, shield_ids:List[str])->List[RunShieldResponse]:
+        def execute_tool(tool_name:str, arguments:Dict[str, Any]):
+            return self.tool_executor._execute_tool(
+                function_name=tool_name,
+                tool_kwargs=arguments,
+                ctx = self.ctx,
+                mcp_tool_to_server= self.mcp_tool_to_server
+            )
         return await asyncio.gather(*[
             self.safety_api.run_shield(
                 shield_id=shield_id,
                 messages=messages,
                 params={
-                    "tool_executor": self.tool_executor,
-                    "ctx": self.ctx,
-                    "mcp_tool_to_server": self.mcp_tool_to_server
+                    "execute_tool_fn": execute_tool,
                 },
             ) for shield_id in shield_ids])
 
-    def find_shields(self, touch_point:str):
-        if touch_point == "tool_input":
-            return ["myclinic_toolguard"]
-        return []
     
     async def _coordinate_tool_execution(
         self,
@@ -895,13 +896,19 @@ class StreamingResponseOrchestrator:
         """Coordinate execution of both function and non-function tool calls."""
         
         #Tool-input Touch point
-        tool_input_shields = self.find_shields(touch_point= "tool_input")
-        shield_resps = await self._shields_before_tools(next_turn_messages, tool_input_shields)
+        tool_input_shield_ids = ["myclinic_toolguard"] #FIXME to pass as arg
+        shield_resps = await self._shields_before_tools(next_turn_messages, tool_input_shield_ids)
         is_violation = lambda shield_resp: shield_resp.violation and shield_resp.violation.violation_level == ViolationLevel.ERROR
         violation = next((shield_resp.violation for shield_resp in shield_resps if is_violation(shield_resp)), None)
         if violation:
             logger.error(violation.user_message)
-            yield OpenAIResponseObjectStreamResponseRefusalDone(data=violation.model_dump())
+            yield OpenAIResponseObjectStreamResponseRefusalDone(
+                content_index = 0,
+                refusal = violation.user_message, # type: ignore
+                item_id = "qqq",
+                output_index= 0,
+                sequence_number= 0
+            )
             for tool_call in non_function_tool_calls:
                 next_turn_messages.append(OpenAIToolMessageParam(
                     tool_call_id=tool_call.id,
@@ -930,7 +937,7 @@ class StreamingResponseOrchestrator:
                     name=tool_call.function.name,
                     id=matching_item_id,
                     server_label=self.mcp_tool_to_server[tool_call.function.name].server_label,
-                    status="in_progress",
+                    # status="in_progress",
                 )
             elif tool_call.function.name == "web_search":
                 item = OpenAIResponseOutputMessageWebSearchToolCall(

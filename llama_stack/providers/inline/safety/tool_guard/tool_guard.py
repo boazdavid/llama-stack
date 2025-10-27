@@ -1,4 +1,4 @@
-from typing import Any, Type, get_args, get_origin
+from typing import Any, Callable, Type, get_args, get_origin
 import sys
 import json
 import asyncio
@@ -74,11 +74,7 @@ class ToolGuardSafetyImpl(Safety, ShieldsProtocolPrivate):
         toolguards = load_toolguards(tool_guard_path)
         
         from rt_toolguard.data_types import PolicyViolationException
-        tool_invoker = ToolInvoker(
-            params.get('ctx'), 
-            params.get("tool_executor"),
-            params.get('mcp_tool_to_server')
-        )
+        tool_invoker = ToolInvoker(params.get('execute_tool_fn'))
         for tool_call in last_message.tool_calls:
             if tool_call.function:
                 try:
@@ -100,20 +96,17 @@ class ToolGuardSafetyImpl(Safety, ShieldsProtocolPrivate):
         raise NotImplementedError()
 
 class ToolInvoker():
-    def __init__(self, ctx:ChatCompletionContext, tool_executor: ToolExecutor, mcp_tool_to_server: dict):
-        self.ctx = ctx
-        self.tool_executor = tool_executor
-        self.mcp_tool_to_server = mcp_tool_to_server
+    def __init__(self, execute_tool_fn: Callable[[str, dict], Any]):
+        self.execute_tool_fn = execute_tool_fn
 
     T = TypeVar("T")
     def invoke(self, toolname: str, arguments: dict[str, Any], model: Type[T])->T:
+        #async to sync
         loop = asyncio.get_event_loop()
         err, result = loop.run_until_complete(
-            self.tool_executor._execute_tool(
-                function_name=toolname,
-                tool_kwargs=arguments,
-                ctx = self.ctx,
-                mcp_tool_to_server= self.mcp_tool_to_server
+            self.execute_tool_fn(
+                toolname,
+                arguments,
             )
         )
         if result.content and result.content[0].text:
