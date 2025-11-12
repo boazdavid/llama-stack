@@ -867,23 +867,13 @@ class StreamingResponseOrchestrator:
             model=result.model,
         )
     
-    async def _shields_before_tools(self, messages, shield_ids:List[str])->List[RunShieldResponse]:
-        def execute_tool(tool_name:str, arguments:Dict[str, Any]):
-            return self.tool_executor._execute_tool(
-                function_name=tool_name,
-                tool_kwargs=arguments,
-                ctx = self.ctx,
-                mcp_tool_to_server= self.mcp_tool_to_server
-            )
-        return await asyncio.gather(*[
-            self.safety_api.run_shield(
-                shield_id=shield_id,
-                messages=messages,
-                params={
-                    "execute_tool_fn": execute_tool,
-                },
-            ) for shield_id in shield_ids])
-
+    async def _execute_tool(self, tool_name:str, arguments:Dict[str, Any]):
+        return await self.tool_executor._execute_tool(
+            function_name=tool_name,
+            tool_kwargs=arguments,
+            ctx = self.ctx,
+            mcp_tool_to_server= self.mcp_tool_to_server
+        )
     
     async def _coordinate_tool_execution(
         self,
@@ -896,8 +886,15 @@ class StreamingResponseOrchestrator:
         """Coordinate execution of both function and non-function tool calls."""
         
         #Tool-input Touch point
-        tool_input_shield_ids = ["myclinic_toolguard"] #FIXME to pass as arg
-        shield_resps = await self._shields_before_tools(next_turn_messages, tool_input_shield_ids)
+        before_toolcall_shield_ids = ["myclinic_toolguard"] #FIXME mock
+        shield_resps = await asyncio.gather(*[
+            self.safety_api.run_shield(
+                shield_id=shield_id,
+                messages=next_turn_messages,
+                params={
+                    "execute_tool_fn": self._execute_tool,
+                },
+            ) for shield_id in before_toolcall_shield_ids])
         is_violation = lambda shield_resp: shield_resp.violation and shield_resp.violation.violation_level == ViolationLevel.ERROR
         violation = next((shield_resp.violation for shield_resp in shield_resps if is_violation(shield_resp)), None)
         if violation:
@@ -905,7 +902,7 @@ class StreamingResponseOrchestrator:
             yield OpenAIResponseObjectStreamResponseRefusalDone(
                 content_index = 0,
                 refusal = violation.user_message, # type: ignore
-                item_id = "qqq",
+                item_id = "qqq",#FIXME
                 output_index= 0,
                 sequence_number= 0
             )
